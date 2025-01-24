@@ -1,6 +1,9 @@
 #Additional
 config/config.yaml
 config/notes.md
+data/input/*
+data/output/*
+models/whisper_models/*
 
 
 # Byte-compiled / optimized / DLL files
