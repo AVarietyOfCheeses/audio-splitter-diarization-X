@@ -3,15 +3,29 @@ import torch
 import yaml
 import json
 import os
+import subprocess
+import re
+import unicodedata
+from tkinter import filedialog, Tk
 import gc
 
-config_file =  os.path.join('config', 'config.yaml')
+config_file = os.path.join('config', 'config.yaml')
+model_dir = r'models\whisper_models'
+output_dir = r'data\output'
+
 device = "cuda"
 batch_size = 16  # reduce if low on GPU mem
 compute_type = "float16"  # change to "int8" if low on GPU mem (may reduce accuracy)
-
+save_audio_ext = '.wav'
 
 print(torch.cuda.is_available())
+
+# Default configuration values
+whisper_language = 'en'
+whisper_model = "large-v2"
+whisper_folder = False
+whisper_diarize = False
+whisper_hf_token = 'HF_Token'
 
 def read_config(config_file):
     """
@@ -53,69 +67,110 @@ def write_config(config_file, language, model, one_folder, diarize, hf_token):
     with open(config_file, 'w') as f:
         yaml.dump(config, f, default_flow_style=False)
 
-# Example usage
-# write_config(config_file, "en", "large-v2", False, False, "your_actual_hf_token")
+def load_config():
+    global whisper_language, whisper_model, whisper_folder, whisper_diarize, whisper_hf_token
+    config = read_config(config_file)
+    whisper_language = config.get('language', whisper_language)
+    whisper_model = config.get('model', whisper_model)
+    whisper_folder = config.get('one_folder', whisper_folder)
+    whisper_diarize = config.get('diarize', whisper_diarize)
+    whisper_hf_token = config.get('hf_token', whisper_hf_token)
 
-config = read_config(config_file)
-whisper_language = config.get('language')  # Access the language setting
-whisper_model = config.get('model')
-whisper_folder = config.get('one_folder')
-whisper_diarize = config.get('diarize')
-whisper_hf_token = config.get('hf_token')
+def sanitize_filename(filepath):
+    filename = os.path.splitext(os.path.basename(filepath))[0]
+    # Remove diacritics and normalize Unicode characters
+    normalized = unicodedata.normalize('NFKD', filename)
+    sanitized = ''.join(c for c in normalized if not unicodedata.combining(c))
+    # Regular Expression to match invalid characters
+    invalid_chars_pattern = r'[<>:"/\\|?*]'
+    # Replace invalid characters with an underscore
+    return re.sub(invalid_chars_pattern, '_', sanitized)
 
-audio_file = config.get('audio_file')
-model_dir = config.get('model_dir')
+def run_whisperx(audio_file_path, new_output_dir, audio_filename):
+    # 1. Transcribe with original whisper (batched)
+    model = whisperx.load_model(whisper_model, device, compute_type=compute_type, download_root=model_dir)
 
-# 1. Transcribe with original whisper (batched)
+    audio = whisperx.load_audio(audio_file_path)
+    result = model.transcribe(audio, batch_size=batch_size)
+    # 2. Align whisper output
+    model_a, metadata = whisperx.load_align_model(language_code=whisper_language, device=device)
+    result = whisperx.align(result["segments"], model_a, metadata, audio, device, return_char_alignments=False)
+    # Create the path for the new .json file
+    json_filename = os.path.join(new_output_dir, f"{audio_filename}.json")
 
-# Save model to local path (optional)
+    if whisper_diarize:
+        try:
+            # 3. Assign speaker labels
+            diarize_model = whisperx.DiarizationPipeline(use_auth_token=whisper_hf_token, device=device)
+            diarize_segments = diarize_model(audio)
+            result = whisperx.assign_word_speakers(diarize_segments, result)
+            print(diarize_segments)
+            segment_data = result["segments"]  # segments are now assigned speaker IDs
+        except Exception as e:
+            print(f"Diarization Failed: {e}")
+    else:
+        print("Diarize not enabled")
+    # Open the file and write the data in JSON format
+    print(result["segments"])
 
-model = whisperx.load_model(whisper_model, device, compute_type=compute_type, download_root=model_dir)
+    with open(json_filename, 'w') as json_file:
+        json.dump(result["segments"], json_file, indent=4)
 
-audio = whisperx.load_audio(audio_file)
-result = model.transcribe(audio, batch_size=batch_size)
-print(result["segments"])  # before alignment
 
-# Delete model if low on GPU resources
-# gc.collect()
-# torch.cuda.empty_cache()
-# del model
+def select_audio_files():
+    # Initialize tkinter root window (it won't show up)
+    root = Tk()
+    root.withdraw()  # Hide the main tkinter window
+    # Ask user to select a folder
+    folder_path = filedialog.askdirectory(title="Select Folder Containing Audio Files")
+    # Check if folder was selected
+    if folder_path:
+        # List of audio file extensions you want to include
+        audio_extensions = ('.mp3', '.wav', '.flac', '.aac', '.ogg')
+        # Get all files in the selected folder
+        audio_files = [f for f in os.listdir(folder_path) if f.lower().endswith(audio_extensions)]
+        print(f"Selected folder: {folder_path}")
+        print("Audio files in folder:")
+        for audio_file in audio_files:
+            print(audio_file)
+        return folder_path, audio_files
+    else:
+        print("No folder selected or no audio files found.")
+        return None, None
 
-# 2. Align whisper output
-model_a, metadata = whisperx.load_align_model(language_code=whisper_language, device=device)
+def process_audio_files(input_folder):
 
-result = whisperx.align(result["segments"], model_a, metadata, audio, device, return_char_alignments=False)
+    for audio_file in os.listdir(input_folder):
 
-print(result["segments"])  # after alignment
+        audio_file_path = os.path.join(input_folder, audio_file)
 
-# Delete model if low on GPU resources
-# gc.collect()
-# torch.cuda.empty_cache()
-# del model_a
+        audio_filename = sanitize_filename(audio_file_path)
+        new_output_dir = os.path.join(output_dir, audio_filename)
 
-if whisper_diarize:
-    try:
-        # 3. Assign speaker labels
-        diarize_model = whisperx.DiarizationPipeline(use_auth_token=whisper_hf_token, device=device)
+        os.makedirs(output_dir, exist_ok=True)
+        os.makedirs(new_output_dir, exist_ok=True)
 
-        # Add min/max number of speakers if known
-        diarize_segments = diarize_model(audio)
-        # diarize_model(audio, min_speakers=min_speakers, max_speakers=max_speakers)
 
-        result = whisperx.assign_word_speakers(diarize_segments, result)
+        if not os.path.isfile(audio_file_path):
+            continue
+        if not audio_file.endswith(save_audio_ext):
+            wav_file_path = os.path.join(new_output_dir, f"{audio_filename}{save_audio_ext}")
+            try:
+                subprocess.run(['ffmpeg', '-i', audio_file_path, wav_file_path], check=True)
+                audio_file_path = wav_file_path
+            except subprocess.CalledProcessError as e:
+                print(f"Error: {e.output}. Couldn't convert {audio_file} to {save_audio_ext} format.")
+                continue
+        run_whisperx(audio_file_path, new_output_dir, audio_filename)
+        srt_file = os.path.join(output_dir, f"{os.path.splitext(audio_file)[0]}.srt")
+        # Set the output directory for speaker segments to be a subdirectory named after the .wav file
+        speaker_segments_dir = os.path.join(output_dir, os.path.splitext(audio_file)[0])
+        os.makedirs(speaker_segments_dir, exist_ok=True)
 
-        diarize_data = diarize_segments
+def main():
+    input_folder, audio_files = select_audio_files()
+    load_config()
+    process_audio_files(input_folder)
 
-        print(diarize_segments)
-
-        segment_data = result["segments"]  # segments are now assigned speaker IDs
-        # Save to JSON file
-        with open('segment_data.json', 'w') as json_file:
-            json.dump(segment_data, json_file, indent=4)
-
-        print(result["segments"])  # segments are now assigned speaker IDs
-
-    except Exception as e:
-        print(f"Diarization Failed: {e}")
-else:
-    print("Diarize not enabled")
+if __name__ == "__main__":
+    main()
