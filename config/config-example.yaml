@@ -1,0 +1,15 @@
+# Language selection based on ISO 639
+language: "en"
+
+# Choices: ["tiny", "base", "small", "medium", "large-v2"]
+model: "large-v3"
+
+# Boolean flag for using one folder
+one_folder: False
+
+# Enable or disable diarization
+diarize: True
+
+# Hugging Face token (replace with your actual token)
+HF_token: "hf_token"
+

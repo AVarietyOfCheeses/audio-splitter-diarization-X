@@ -6,8 +6,8 @@ import os
 import subprocess
 import re
 import unicodedata
+from pydub import AudioSegment
 from tkinter import filedialog, Tk
-import gc
 
 config_file = os.path.join('config', 'config.yaml')
 model_dir = r'models\whisper_models'
@@ -86,9 +86,54 @@ def sanitize_filename(filepath):
     # Replace invalid characters with an underscore
     return re.sub(invalid_chars_pattern, '_', sanitized)
 
+
+def split_audio(json_filename, audio_file_path, new_output_dir):
+        # Load the JSON file
+    with open(json_filename, 'r') as file:
+        data = json.load(file)
+
+    # Load the WAV file
+    audio = AudioSegment.from_wav(audio_file_path)
+
+    # Create directories for each speaker
+    speakers = set(item['speaker'] for item in data)
+    for speaker in speakers:
+        speaker_file_path = os.path.join(new_output_dir, speaker)
+        os.makedirs(speaker_file_path, exist_ok=True)
+
+    # Process each sentence
+    for index, item in enumerate(data):
+        start_time = item['start'] * 1000  # Convert to milliseconds
+        end_time = item['end'] * 1000  # Convert to milliseconds
+        text = item['text']
+        speaker = item['speaker']
+
+        # Extract the segment
+        segment = audio[start_time:end_time]
+
+        # Save the segment to the corresponding speaker's directory
+        speaker_file_path = os.path.join(new_output_dir, speaker)
+        segment_path = os.path.join(speaker_file_path, f"{start_time}_{end_time}.wav")
+        segment.export(segment_path, format="wav")
+
+        # Convert start and end times to SRT format (hh:mm:ss,mmm)
+        start_srt = f"{int(start_time // 3600000):02}:{int((start_time % 3600000) // 60000):02}:{int((start_time % 60000) // 1000):02},{int(start_time % 1000):03}"
+        end_srt = f"{int(end_time // 3600000):02}:{int((end_time % 3600000) // 60000):02}:{int((end_time % 60000) // 1000):02},{int(end_time % 1000):03}"
+
+        # Save the text to a subtitle file in the corresponding speaker's directory
+        subtitle_path = os.path.join(speaker_file_path, f"{start_time}_{end_time}.srt")
+        with open(subtitle_path, 'w') as subtitle_file:
+            subtitle_file.write(f"{index + 1}\n")
+            subtitle_file.write(f"{start_srt} --> {end_srt}\n")
+            subtitle_file.write(f"{text}\n")
+
+
+    print("Processing complete.")
+
 def run_whisperx(audio_file_path, new_output_dir, audio_filename):
     # 1. Transcribe with original whisper (batched)
     model = whisperx.load_model(whisper_model, device, compute_type=compute_type, download_root=model_dir)
+    
 
     audio = whisperx.load_audio(audio_file_path)
     result = model.transcribe(audio, batch_size=batch_size)
@@ -115,6 +160,8 @@ def run_whisperx(audio_file_path, new_output_dir, audio_filename):
 
     with open(json_filename, 'w') as json_file:
         json.dump(result["segments"], json_file, indent=4)
+
+    split_audio(json_filename, audio_file_path, new_output_dir)
 
 
 def select_audio_files():
@@ -162,10 +209,7 @@ def process_audio_files(input_folder):
                 print(f"Error: {e.output}. Couldn't convert {audio_file} to {save_audio_ext} format.")
                 continue
         run_whisperx(audio_file_path, new_output_dir, audio_filename)
-        srt_file = os.path.join(output_dir, f"{os.path.splitext(audio_file)[0]}.srt")
-        # Set the output directory for speaker segments to be a subdirectory named after the .wav file
-        speaker_segments_dir = os.path.join(output_dir, os.path.splitext(audio_file)[0])
-        os.makedirs(speaker_segments_dir, exist_ok=True)
+
 
 def main():
     input_folder, audio_files = select_audio_files()
